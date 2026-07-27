@@ -8,25 +8,39 @@ import { ReminderModal } from '../components/ReminderModal';
 import { AnalyticsView } from '../components/AnalyticsView';
 import { DokandarLoginModal, DokandarProfile, DEMO_SHOPS } from '../components/DokandarLoginModal';
 import { POSBillingModal } from '../components/POSBillingModal';
+import { DatabaseSetupModal } from '../components/DatabaseSetupModal';
+import { LandingPage } from '../components/LandingPage';
+import { AuthView } from '../components/AuthView';
 import { Customer, Transaction, GemmaIntentResult } from '../types/ledger';
 import {
-  getStoredCustomers,
-  saveStoredCustomers,
-  getStoredTransactions,
-  saveStoredTransactions,
+  getStoredCustomersForTerminal,
+  saveStoredCustomersForTerminal,
+  getStoredTransactionsForTerminal,
+  saveStoredTransactionsForTerminal,
+  resetDatabaseForTerminal,
   exportLedgerToCSV,
 } from '../utils/storage';
-import { Sparkles, BarChart2, BookOpen, Download, RefreshCw, Store, ShoppingBag } from 'lucide-react';
+import {
+  getActiveDokandarSession,
+  setActiveDokandarSession,
+  logoutDokandarSession,
+  DokandarUser,
+} from '../services/dbService';
+import { RefreshCw, CheckCircle2, ShieldAlert } from 'lucide-react';
 
-export default function Home() {
+export default function Page() {
+  const [currentView, setCurrentView] = useState<'LANDING' | 'APP' | 'AUTH'>('LANDING');
+  const [authMode, setAuthMode] = useState<'LOGIN' | 'REGISTER'>('LOGIN');
+
+  const [dokandarProfile, setDokandarProfile] = useState<DokandarUser | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // Dokandar Profile State
-  const [dokandarProfile, setDokandarProfile] = useState<DokandarProfile>(DEMO_SHOPS[0]);
+  // Modals
   const [isDokandarModalOpen, setIsDokandarModalOpen] = useState(false);
   const [isPOSModalOpen, setIsPOSModalOpen] = useState(false);
+  const [isDatabaseSetupOpen, setIsDatabaseSetupOpen] = useState(false);
 
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [reminderCustomer, setReminderCustomer] = useState<Customer | null>(null);
@@ -34,13 +48,54 @@ export default function Home() {
 
   const [apiKey, setApiKey] = useState('');
   const [activeTab, setActiveTab] = useState<'LEDGER' | 'ANALYTICS'>('LEDGER');
+  const [toastMessage, setToastMessage] = useState<{ text: string; type?: 'SUCCESS' | 'ERROR' } | null>(null);
 
-  // Load real-time stored data on client mount to eliminate SSR hydration mismatch
+  // Load active session and user-specific data on mount
   useEffect(() => {
-    setCustomers(getStoredCustomers());
-    setTransactions(getStoredTransactions());
+    const activeSession = getActiveDokandarSession();
+    if (activeSession) {
+      setDokandarProfile(activeSession);
+      setCustomers(getStoredCustomersForTerminal(activeSession.terminalId));
+      setTransactions(getStoredTransactionsForTerminal(activeSession.terminalId));
+    }
     setIsLoaded(true);
   }, []);
+
+  // Reload data whenever dokandarProfile changes
+  useEffect(() => {
+    if (dokandarProfile) {
+      setCustomers(getStoredCustomersForTerminal(dokandarProfile.terminalId));
+      setTransactions(getStoredTransactionsForTerminal(dokandarProfile.terminalId));
+    } else {
+      setCustomers([]);
+      setTransactions([]);
+    }
+  }, [dokandarProfile]);
+
+  const triggerToast = (text: string, type: 'SUCCESS' | 'ERROR' = 'SUCCESS') => {
+    setToastMessage({ text, type });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  // Guarded Dashboard Access Handler
+  const handleAccessDashboard = () => {
+    if (!dokandarProfile) {
+      setAuthMode('LOGIN');
+      setCurrentView('AUTH');
+      triggerToast('ড্যাশবোর্ডে প্রবেশের জন্য প্রথমে অ্যাকাউন্ট লগইন অথবা রেজিস্টার করুন!', 'ERROR');
+      return;
+    }
+    setCurrentView('APP');
+  };
+
+  const handleLogout = () => {
+    logoutDokandarSession();
+    setDokandarProfile(null);
+    setCustomers([]);
+    setTransactions([]);
+    setCurrentView('LANDING');
+    triggerToast('সফলভাবে অ্যাকাউন্ট থেকে লগআউট করা হয়েছে।');
+  };
 
   const totalBaki = customers.reduce((acc, c) => acc + c.totalBaki, 0);
 
@@ -49,6 +104,11 @@ export default function Home() {
     dialect?: string,
     rawTranscript?: string
   ) => {
+    if (!dokandarProfile) {
+      triggerToast('লেনদেন রেকর্ড করার জন্য দোকানদার লগইন প্রয়োজন!', 'ERROR');
+      return;
+    }
+
     let existingCustomer = customers.find((c) => c.name === result.customerName);
     let customerId = existingCustomer ? existingCustomer.id : `cust-${Date.now()}`;
     const nowStr = new Date().toISOString().split('T')[0];
@@ -71,18 +131,18 @@ export default function Home() {
 
     const updatedTxs = [newTx, ...transactions];
     setTransactions(updatedTxs);
-    saveStoredTransactions(updatedTxs);
+    saveStoredTransactionsForTerminal(dokandarProfile.terminalId, updatedTxs);
 
     let updatedCusts: Customer[];
     if (existingCustomer) {
       updatedCusts = customers.map((c) =>
         c.id === customerId
           ? {
-            ...c,
-            totalBaki: c.totalBaki + result.netBaki,
-            lastTransactionDate: nowStr,
-            transactionCount: c.transactionCount + 1,
-          }
+              ...c,
+              totalBaki: c.totalBaki + result.netBaki,
+              lastTransactionDate: nowStr,
+              transactionCount: c.transactionCount + 1,
+            }
           : c
       );
     } else {
@@ -99,7 +159,8 @@ export default function Home() {
     }
 
     setCustomers(updatedCusts);
-    saveStoredCustomers(updatedCusts);
+    saveStoredCustomersForTerminal(dokandarProfile.terminalId, updatedCusts);
+    triggerToast(`সফলভাবে বাকি লেনদেন রেকর্ড করা হয়েছে: ${result.customerName} (৳${result.netBaki})`);
   };
 
   const handleOpenReminder = (cust: Customer) => {
@@ -108,87 +169,144 @@ export default function Home() {
   };
 
   const handleExportCSV = () => {
-    exportLedgerToCSV(transactions);
+    if (!dokandarProfile) return;
+    exportLedgerToCSV(transactions, dokandarProfile.shopName);
+    triggerToast(`Hisab.AI - ${dokandarProfile.shopName} এর CSV ফাইল ডাউনলোড সম্পন্ন!`);
+  };
+
+  const handleSuccessLogin = (user: DokandarUser) => {
+    setDokandarProfile(user);
+    setActiveDokandarSession(user);
+    setCurrentView('APP');
+    triggerToast(`স্বাগতম! ${user.shopName} টার্মিনালে সফলভাবে প্রবেশ করেছেন।`);
+  };
+
+  const handleResetDatabase = () => {
+    if (!dokandarProfile) return;
+    const fresh = resetDatabaseForTerminal(dokandarProfile.terminalId);
+    setCustomers(fresh.customers);
+    setTransactions(fresh.transactions);
+    setIsDatabaseSetupOpen(false);
+    triggerToast(`${dokandarProfile.shopName} এর ডেমো ডাটাবেস সফলভাবে সেটআপ করা হয়েছে!`);
   };
 
   if (!isLoaded) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center font-['Hind_Siliguri',sans-serif]">
         <div className="flex items-center gap-3">
-          <RefreshCw className="w-6 h-6 text-emerald-400 animate-spin" />
-          <span>Hisab.AI (হিসাব.এআই) ডাটাবেস লোড হচ্ছে...</span>
+          <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin" />
+          <span className="text-xs font-semibold">Hisab.AI সিস্টেম লোড হচ্ছে...</span>
         </div>
       </div>
     );
   }
 
+  // RENDER LANDING PAGE
+  if (currentView === 'LANDING') {
+    return (
+      <>
+        <LandingPage
+          onLaunchApp={handleAccessDashboard}
+          onOpenAuth={(mode) => {
+            setAuthMode(mode || 'LOGIN');
+            setCurrentView('AUTH');
+          }}
+          onOpenDatabaseSetup={() => setIsDatabaseSetupOpen(true)}
+          onOpenVoiceModal={() => {
+            if (!dokandarProfile) {
+              setAuthMode('LOGIN');
+              setCurrentView('AUTH');
+              triggerToast('ভয়েস ইনপুট টেস্টের জন্য প্রথমে লগইন অথবা রেজিস্টার করুন!', 'ERROR');
+            } else {
+              setCurrentView('APP');
+              setIsVoiceModalOpen(true);
+            }
+          }}
+          isLoggedIn={!!dokandarProfile}
+        />
+
+        <DatabaseSetupModal
+          isOpen={isDatabaseSetupOpen}
+          onClose={() => setIsDatabaseSetupOpen(false)}
+          customers={customers}
+          transactions={transactions}
+          onResetToDemoData={handleResetDatabase}
+        />
+      </>
+    );
+  }
+
+  // RENDER AUTH (LOGIN / REGISTER) PAGE
+  if (currentView === 'AUTH') {
+    return (
+      <>
+        <AuthView
+          onSuccessLogin={handleSuccessLogin}
+          onBackToLanding={() => setCurrentView('LANDING')}
+          initialMode={authMode}
+        />
+
+        <DatabaseSetupModal
+          isOpen={isDatabaseSetupOpen}
+          onClose={() => setIsDatabaseSetupOpen(false)}
+          customers={customers}
+          transactions={transactions}
+          onResetToDemoData={handleResetDatabase}
+        />
+      </>
+    );
+  }
+
+  // RENDER MAIN LEDGER DASHBOARD APP (Guarded: User MUST be logged in)
+  if (!dokandarProfile) {
+    return (
+      <AuthView
+        onSuccessLogin={handleSuccessLogin}
+        onBackToLanding={() => setCurrentView('LANDING')}
+        initialMode="LOGIN"
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-['Hind_Siliguri',sans-serif]">
-      {/* Top Header Navbar */}
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-['Hind_Siliguri',sans-serif] relative">
+      {/* Toast Notification Banner */}
+      {toastMessage && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 bg-slate-900 border font-semibold text-xs px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 animate-fade-in ${
+            toastMessage.type === 'ERROR'
+              ? 'border-red-500/50 text-red-300'
+              : 'border-emerald-500/40 text-emerald-300'
+          }`}
+        >
+          {toastMessage.type === 'ERROR' ? (
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{toastMessage.text}</span>
+        </div>
+      )}
+
+      {/* Single Unified Header Navbar */}
       <Navbar
+        onNavigateHome={() => setCurrentView('LANDING')}
         onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
         onOpenPOSModal={() => setIsPOSModalOpen(true)}
         onOpenDokandarModal={() => setIsDokandarModalOpen(true)}
+        onOpenAuth={(mode) => {
+          setAuthMode(mode || 'LOGIN');
+          setCurrentView('AUTH');
+        }}
+        onOpenDatabaseSetup={() => setIsDatabaseSetupOpen(true)}
+        onExportCSV={handleExportCSV}
+        onLogout={handleLogout}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
         currentProfile={dokandarProfile}
-        apiKey={apiKey}
-        onApiKeyChange={setApiKey}
         totalBaki={totalBaki}
         totalCustomers={customers.filter((c) => c.totalBaki > 0).length}
       />
-
-      {/* Hero Banner Strip */}
-      <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-teal-950 border-b border-emerald-500/20 px-4 py-6">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <div>
-            <h2 className="text-2xl md:text-3xl font-extrabold text-white">
-              Hisab.AI
-            </h2>
-            <p className="text-sm text-slate-300 mt-1">
-              আঞ্চলিক বাংলা ভয়েস ইনপুট থেকে রিয়েল-টাইমে বাকি খাতা প্রস্তুত ও স্মার্ট তাগাদা বার্তা তৈরি করে।
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setIsPOSModalOpen(true)}
-              className="flex items-center gap-1.5 bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/40 px-3.5 py-2 rounded-xl text-xs font-bold transition-all"
-            >
-              <ShoppingBag className="w-4 h-4" />
-              <span>POS ক্যাশমেমো</span>
-            </button>
-
-            <button
-              onClick={handleExportCSV}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-semibold border border-slate-700 transition-all"
-              title="CSV ফাইল ডাউনলোড করুন"
-            >
-              <Download className="w-4 h-4 text-emerald-400" />
-              <span>এক্সপোর্ট CSV</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('LEDGER')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition-all ${activeTab === 'LEDGER'
-                ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-            >
-              <BookOpen className="w-4 h-4" />
-              <span>ডিজিটাল বাকি খাতা</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('ANALYTICS')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition-all ${activeTab === 'ANALYTICS'
-                ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-            >
-              <BarChart2 className="w-4 h-4" />
-              <span>ঝুঁকি ও অ্যানালিটিক্স</span>
-            </button>
-          </div>
-        </div>
-      </div>
 
       {/* Main Workspace Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6">
@@ -222,7 +340,11 @@ export default function Home() {
         isOpen={isDokandarModalOpen}
         onClose={() => setIsDokandarModalOpen(false)}
         currentProfile={dokandarProfile}
-        onSelectProfile={setDokandarProfile}
+        onSelectProfile={(p) => {
+          setDokandarProfile(p as DokandarUser);
+          setActiveDokandarSession(p as DokandarUser);
+          triggerToast(`সুইচ করা হয়েছে: ${p.shopName}`);
+        }}
       />
 
       <POSBillingModal
@@ -232,10 +354,18 @@ export default function Home() {
         onAddTransaction={handleAddTransactionFromGemma}
       />
 
+      <DatabaseSetupModal
+        isOpen={isDatabaseSetupOpen}
+        onClose={() => setIsDatabaseSetupOpen(false)}
+        customers={customers}
+        transactions={transactions}
+        onResetToDemoData={handleResetDatabase}
+      />
+
       {/* Footer */}
-      <footer className="border-t border-slate-800 bg-slate-900/60 py-4 px-4 text-center text-xs text-slate-400">
+      <footer className="border-t border-slate-800 bg-slate-950 py-4 px-4 text-center text-xs text-slate-500">
         <p className="font-medium">
-          Hisab.AI (হিসাব.এআই) - Built by <span className="text-emerald-400 font-bold">Team BrainForge | UIU</span> for Build With Gemma @ Bangladesh Hackathon 2026
+          Hisab.AI (হিসাব.এআই) — Built by Team BrainForge | UIU for Build With Gemma @ Bangladesh Hackathon 2026
         </p>
       </footer>
     </div>
